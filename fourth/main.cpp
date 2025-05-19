@@ -1,37 +1,48 @@
+
+
 #include <fstream>
 #include <iostream>
-#include <iterator>
 #include <regex>
 #include <string>
 
 int main() {
   std::fstream file("./input.txt");
-  std::string input;
-  int sum = 0;
-  std::regex re(R"(mul\((\d+),(\d+)\))"); // Regex to match "mul(3,4)"
+  if (!file) {
+    std::cerr << "Error: Could not open input.txt\n";
+    return 1;
+  }
 
-  while (std::getline(file, input)) { // Read entire line
+  std::string input;
+  std::regex re(
+      R"(mul\((\d+),(\d+)\)|do\(\)|don't\(\))"); // Match "mul(NUM,NUM)",
+                                                 // "do()", and "don't()"
+
+  bool command = true; // Starts enabled
+  int sum = 0;
+
+  while (std::getline(file, input)) { // Read each line
     std::sregex_iterator it(input.begin(), input.end(), re);
     std::sregex_iterator end;
 
-    bool found = false;
     for (; it != end; ++it) {
-      found = true;
       std::smatch match = *it;
-      int a = std::stoi(match[1].str()); // Convert to int
-      int b = std::stoi(match[2].str());
-      sum += (a * b);
+      std::string found = match.str();
 
-      std::cout << "Matched: " << match.str() << "\n";
-      std::cout << "First number: " << a << "\n";
-      std::cout << "Second number: " << b << "\n";
-    }
+      if (found == "do()") {
+        command = true;
+      } else if (found == "don't()") {
+        command = false;
+      } else if (match.size() == 3) { // "mul(NUM,NUM)"
+        int a = std::stoi(match[1].str());
+        int b = std::stoi(match[2].str());
 
-    if (!found) {
-      std::cout << "No match.\n";
+        if (command) {
+          sum += (a * b);
+        }
+      }
     }
   }
 
-  std::cout << "Sum: " << sum << std::endl;
+  std::cout << "Final Sum: " << sum << std::endl;
   return 0;
 }
