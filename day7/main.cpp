@@ -32,7 +32,7 @@ int main(int argc, char *argv[]) {
     const std::vector<int> &vec = line.second;
 
     int bitLength = vec.size() - 1;
-    int combinations = std::pow(2, bitLength) - 1;
+    int combinations = std::pow(3, bitLength);
 
     for (const auto &a : vec) {
     }
@@ -41,20 +41,26 @@ int main(int argc, char *argv[]) {
       std::uint64_t sum = vec[0];
       int vectorIndex = 0;
 
-      int mask = 1 << (bitLength - 1);
+      int opCode = x;
       for (int i = bitLength; i > 0; --i) {
+        int op = opCode % 3;
+        opCode /= 3;
 
-        if (x & mask) {
-          if (vectorIndex < combinations)
+        if (vectorIndex < bitLength) {
+          if (op == 0)
             sum += vec[vectorIndex + 1];
-        }
-        if (!(x & mask)) {
-          if (vectorIndex < combinations)
+          else if (op == 1)
             sum *= vec[vectorIndex + 1];
+          else if (op == 2) {
+            std::string a, b;
+            a = std::to_string(sum);
+            b = std::to_string(vec[vectorIndex + 1]);
+            std::string concatd = a + b;
+            sum = std::stoull(concatd);
+          }
         }
-        mask >>= 1;
-        if (vectorIndex < combinations)
-          ++vectorIndex;
+
+        ++vectorIndex;
       }
       if (key == sum)
         isLegit = true;
