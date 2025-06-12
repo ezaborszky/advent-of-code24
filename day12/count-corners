@@ -1,0 +1,11 @@
+I just used a simple DFS. There must be exactly as many edges as corners, and it's easy enough to check for corners. Look up and left. If they're both different than the current cell, it's a convex corner:
+
+?B
+BA
+while if they're both the same as the current cell and up-left is different, it's a concave corner:
+
+BA
+AA
+Repeat this for all four diagonals, and you have the number of corners it contributes.
+
+Then at that point, since you're already visiting each cell to sort them into sets, it's easy enough to also count corners while you're at it
