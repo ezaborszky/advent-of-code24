@@ -1,0 +1,1578 @@
+
+                             ==Phrack Inc.==
+
+                Volume 0xde, Issue 0xad, Phile #0xbe of 0xef
+
+|=----------------------------------------------------------------------=|
+|=---------------=[ Taint Me Like One of Your fetch cURLs ]=------------=|
+|=----------------------------------------------------------------------=|
+|=-----------------=[ Discovering IoT CVEs at scale with ]=-------------=|
+|=---------=[ binary pointer alias analysis and compiler theory ]=------=|
+|=----------------------------------------------------------------------=|
+|=-------------------------=[ 4ttil4sz1a ]=-----------------------------=|
+|=---------------------=[ attilaszia@proton.me ]=-----------------------=|
+|=----------------------------------------------------------------------=|
+
+O---[  Index
+
+0  - Introduction
+1  - Taint-style vulnerabilities
+2  - Pointer alias analysis
+3  - TMTDR: Too Much Theory Didn't Read
+4  - Real-world taint-style vulnerabilities
+5  - Access paths and on-demand inter-procedural analysis
+6  - Multi-architecture binary program analysis
+7  - Contributions
+8  - Prototype implementation
+9  - Closing remarks
+10 - References
+11 - Release artifacts
+
+---[ 0 - Introduction
+
+It is 2025. Everything is being rewritten in Rust. Complex mitigations
+make exploiting even strong primitives difficult, almost elusive on
+recent platforms. Big tech threat intelligence groups give talks on
+recovering 0-days from the small traces left in dmesg logs. A lot of
+resources are spent on each side. Even defenders with formidable skills
+have a hard time deciphering the complexity of some exploits that
+target high-value systems like mobile operating systems or browsers.
+
+Does this cat-and-mouse game converge to a fixed point, or are we
+chasing each other like parallels in Bolyai's geometry, only to meet
+at some boundary point at infinity? What is the endgame, the
+singularity of offensive security, the unavoidable heat death of the
+hacker universe? The thermal catastrophe of cyberspace's cosmology,
+where not even Bekenstein entropy increases anymore? Are we left with a
+puddle of conformal quantum field excitations on a boundary of
+something that is likely a de-Sitter hologram written in Haskell by a
+random Gen-Z kid who thinks GitHub is as obsolete as day jobs?
+
+None of these questions will be answered in this article. Instead, we
+will look at something more pragmatic that I have repeatedly asked
+myself on sleepless nights for the past 10 years, staring into the
+full moon:
+
+But what about IoT devices?!
+
+The history, albeit not objective, is well known. Commenting on recent
+tariff policies, Howard Marks called the last 80 years the best
+economic period for mankind, with trade growth being a major reason.
+Financial benefits from globalization included keeping a lid on
+inflation by buying products from abroad. Little does Mr. Marks know
+the cost of cybersecurity risks that inflation cap came with when it
+comes to commercial off-the-shelf IoT devices and the attack
+surfaces of networks where these are installed.
+
+Still, real mayhem never came, apart from the Mirai botnet here and
+there bringing down parts of the internet, Phineas Fisher pwning
+Hacking Team via an IoT exploit with style, and APTs making a sport of
+mass-compromising surveillance devices for strategic objectives and
+overtaking ICS systems for whatever twisted reason.
+
+People with business affinity, now celebrated as demigods on the
+dangerous streets of San Francisco throwing big side-parties during the
+RSA conference, attacked the problem from the networking side. Instead
+of a modern, secure-by-design approach that application development
+follows, IoT devices of the past were never assumed to run secure code.
+A bunch of startups achieved "centaur" status with this practice,
+crossing $100M in annual recurring revenue by selling solutions
+stemming from potential answers to the IoT security problem. They call
+them agentless. People love it. People buy it.
+
+Only recently has the idea of maybe not having vulnerabilities in the
+firmware also enjoyed some renewed interest.
+
+It was hard to wrap my own head around, but where the oligopoly of big
+tech is a disadvantage for various reasons from allocative, productive,
+and dynamic market efficiency standpoints, it is an advantage when
+securing modern digital infrastructure at scale by simply not having
+to deal with complex supply chains and resource allocation problems.
+
+Running hardware companies, arguably, sucks. Unit costs must be kept
+to a minimum, already constraining engineering heavily. Net profit
+margins are dwarfed by those of software companies, even if you pull
+everything off. To stand out from the noise of competing companies, the
+pressure is high to ship more features, even within this constrained
+financial and technological environment. The shortage of skilled
+embedded systems developers with secure coding knowledge does not help
+either. For C-level executives of some manufacturing corporations, as
+long as there is no measurable cost for the lack of security measures
+they are held accountable for at a board meeting, there is zero
+incentive to do anything about it. This is worsened by the
+non-existent consumer awareness that could theoretically affect sales
+by deterring customers from the feature-driven marketing hype cycle.
+Allow me to paraphrase Joel Bakan: public corporations are simply
+obligated by law to prioritize shareholder interests to a psychopathic
+level, as opposed to their customers'. Excuse my French, but these
+entities don't give a flying fuck about you or your privacy.
+
+All of this resulted, to put it bluntly, in shitty code that's easy
+to hack. Pre-auth command injections in web controllers meant to
+configure the locale setting; special DHCP options giving you a root
+shell as a feature rather than a bug; 10-year-old image parsers
+processing the embedded JPEG in your Despacito.flac file that you just
+want to blast on your car's infotainment system via the USB media player.
+
+Still, if IoT vulnerabilities are so low-hanging and secure coding
+quality is so low, how come IoT security never had that "pentest"
+moment? That inflection point where vulnerabilities are commoditized by
+automatic tools to the degree that you just train operators to sit in
+front of them and farm findings without ever looking at the details
+and intricacies of the implementation or understanding the big picture?
+
+Well. This is where we are really taking off after this long introduction.
+
+Instead of answering with more, possibly ill-founded thoughts on the
+tech stack being overly heterogeneous, or market forces not fostering
+an ecosystem of pentesting entities, or manufacturers operating
+outside of verticals with extended adversarial activities or in
+unregulated consumer markets with zero compliance requirements...
+instead of all that, I will invite you on a more difficult route. We
+will discuss one of the primary technical issues preventing the
+commoditization of IoT vulnerability scanners. I am also inviting you
+to my "grand programme" of laying the groundwork for a tool that could
+become one of the open-source options people use in the future to test
+these systems much more efficiently than ever before.
+
+---[ 1 - Taint-style vulnerabilities
+
+Luckily, manufacturers are realizing that relying on open-source
+software is not such a bad idea after all. The Yocto Project is
+getting more traction in the IoT space for generic Linux-based
+embedded systems. Zephyr is a popular solution for RTOS designs, and
+those building routers often fork a version of the OpenWRT project
+rather than relying on SDK demo code. That code often comes from the
+SoC vendor's admittedly poor software team with no guarantee it works.
+
+Similarly, certain devices that went through several cycles of Pwn2Own
+are expected to be in slightly better shape than a sibling that
+received less attention from the community.
+
+Still, looking at the CVEs and threat intel from the past five years,
+one invariant seems ever-present. Most practical exploits don't have
+to rely on complex multi-bug chains like they do in the browser and
+mobile space. Often, a single bug can compromise the whole system.
+
+We are talking about problems where one or a few shots of
+attacker-controlled input hit a networking service on the IoT device
+and reach a security-sensitive "sink," such as an out-of-bounds write
+or a command injection site.
+
+Trivial examples of these are easy to spot, but discovering similar
+issues in production code is considerably more difficult. It is not a
+simple task to identify parts of the code where user-controlled data
+enters the system (so-called ‘sources’ in taint analysis nomenclature).
+It is especially hard to find all feasible paths from these sources to
+the security-sensitive ‘sinks’. The execution flow can span various
+functions; variables get assigned, reassigned, and copied around; and
+indirect calls can happen via function pointers or virtual dispatch.
+
+There is no magic red button saying "exploit this firmware" in Ghidra
+or IDA.
+
+As an additional point, Product Security teams expect a lot from static
+analyzers and are willing to pay a lot for them. This is true even if
+these tools can’t reason about the code's runtime semantics due to
+known theoretical results, such as Rice's theorem. One explanation for
+their success is that they are still better at identifying vulnerable
+code patterns than the average developer.
+
+Results of SAST tools are also known to be noisy, meaning they have many
+false positives. They generally overestimate the feasible execution
+paths in programs and will raise alerts in many cases where the flagged
+vulnerability could never happen in practice.
+
+Circling back, one might ask: why are these taint-style vulnerabilities
+in IoT so hard to catch automatically?
+
+Again, this has to do with the practical and theoretical limitations,
+as well as the trade-off choices, of existing security testing tools.
+
+In particular, the problem boils down to what compiler theory has been
+calling the pointer alias analysis or (modulo some uncertainties in
+interpretation) the points-to analysis problem for the past 50–70 years.
+
+Consider the following example.
+
+void vuln(char* input, char* output){
+    strcpy(output, input); // Stack-based buffer overflow
+}
+
+int main(int argc, char** argv) {
+    char taintedbuf[128];
+    char localbuf[32];
+
+    read(STDIN_FILENO, taintedbuf, 128);
+
+    char* p = taintedbuf;
+    char* q = p;
+
+    vuln(q, localbuf);
+
+    return 0;
+}
+
+It is not hard to catch the vulnerability here with a static analyzer.
+I'm obviously not advertising any brand, but CodeQL seems somewhat
+popular in the research community, even if its engine is not open
+source. With CodeQL, one can configure a source for read() and a sink
+for strcpy() via a module, say ReadToStrcpyFlowConfig. Something
+like the following query will catch the problem:
+
+module ReadToStrcpyFlow = TaintTracking::Global<ReadToStrcpyFlowConfig>;
+
+from
+  ReadToStrcpyFlow::PathNode source, ReadToStrcpyFlow::PathNode sink
+where
+  ReadToStrcpyFlow::flowPath(source, sink)
+select
+  source, sink
+
+Now let's consider a slightly more complex example that better resembles
+a real-world context. Here, there are two structure definitions where
+additional data is stored alongside the pointer. Moreover, the two
+structures are nested. Our target pointer is stored in
+struct data_inner, which in turn is wrapped in data_outer. Our
+vulnerable function now receives the outer structure and copies the data
+via data->ptr_inner->data.
+
+struct data_inner {
+    int key;
+    unsigned int hash;
+    char* data;
+};
+
+struct data_outer {
+    int key;
+    unsigned int hash;
+    struct data_inner* ptr_inner;
+};
+
+int vulnerable(struct data_outer* data);
+
+int main(int argc, char** argv) {
+    char taintedbuf[128];
+    struct data_inner d1;
+    struct data_outer d2;
+
+    d1.key = 0xdead;
+    d2.key = 0xbeef;
+    d1.hash = 0xcafe;
+    d2.hash = 0xbabe;
+    d2.ptr_inner = &d1;
+    d2.ptr_inner->data = (char *)&taintedbuf;
+
+    read(STDIN_FILENO, taintedbuf, 128);
+    vulnerable(&d2);
+    return 0;
+}
+
+int vulnerable(struct data_outer* data) {
+    char localbuf[64];
+    strcpy(localbuf, data->ptr_inner->data);
+}
+
+
+Believe it or not, CodeQL is unable to identify an issue here. Why?
+
+CodeQL chooses not to implement detailed pointer alias analysis as a
+design decision to keep things relatively fast.
+
+In many ways, static analyzers must balance computational complexity,
+precision, and scalability. They also need to maintain a nice user
+experience with an intuitive API or rule syntax. Still, aiming low on
+the pointer alias analysis problem means that CodeQL and most other
+SAST tools won't find many juicy, practical vulnerabilities. These are
+often super simple for human analysts to find and for attackers to exploit.
+
+So simple, in fact, that if you're suspecting that almost all LLMs would
+find the vulnerability in the code above, you're not wrong.
+
+If you're into Dijkstra and program correctness, or just mathematical
+structuralism for that matter, you might already sense why I'm not a fan
+of the LLM approach here. Otherwise, I'm not going to dive into the
+philosophical and aesthetic problems of why it is not a good idea. Why
+tokenize code, send it through a long sequence of matrix multiplications
+on overpriced Nvidia GPUs, with some non-linearities sprinkled in? Just
+to get a probability distribution that you can sample from with some
+temperature factor to find out, with high probability, that your code
+is vulnerable... well, most of the time.
+
+It is harder and harder to fight the distortions of reality caused by
+the large amounts of venture capital thrown at these approaches. But for
+the sake of this article, we are resorting to well-established measures
+of computational complexity and cost from the CS classes that some of
+you have taken at university.
+
+I'd like to convince you that the algorithm we are going to discuss here
+is a cheaper way to do these things. Also, in some admittedly ill-defined
+metric, I'd like to argue that it is the right way to do this as well.
+
+---[ 2 - Pointer alias analysis
+
+So what is this problem and why is it difficult? Basically, you are trying
+to identify all pointer definitions p and q, where q may alias p.
+Two pointers alias each other when they point to the same object. Consider
+this example.
+
+
+void func(int num, int** p, int** q, int** r, int** s, int** t) {
+        if (num<10) {
+                *r = *q;
+                *q = *p;
+        }
+        else {
+                *r = *q;
+        }
+        *t = *p;
+}
+
+int main(int argc, char** argv) {
+        int object1 = 0xdead;
+        int object2 = 0xbeef;
+        int object3 = 0xcafe;
+        int *p, *q, *r, *s, *t;
+
+        p = &object1;
+        q = &object2;
+        s = &object3;
+
+        if (argc > 1) {
+                func(atoi(argv[1]), &p, &q, &r, &s, &t);
+        }
+        else {
+                printf("Taking one parameter %s <num>\n", argv[0]);
+                exit(1);
+        }
+
+        /* p, q, r, s, t are still alive here */
+        printf("%x %x %x %x %x", *p, *q, *r, *s, *t);
+
+        return 0;
+}
+
+
+At the end of the main function, the following are true:
+
+p and q may alias
+p and r never alias
+p and s never alias
+p and t must alias
+
+q and r may alias
+q and s never alias
+q and t may alias
+
+r and s never alias
+r and t never alias
+
+s and t never alias
+
+If you compile this for whatever architecture, fire up Ghidra and load
+it. There will be a basic block implementing the final printf and
+return statement. All of these relationships hold for the values of
+p, q, r, s, and t at that basic block.
+
+Crucially, we can also be interested in aliasing relationships at a
+different basic block. For instance, consider the block before the
+conditional is taken, where the locals p, q, and s get their values.
+Can we establish aliasing relationships between the object addresses
+there and the pointers at the final return block?
+
+Since the func() operations do not change p or s, and we also see
+that r always receives the value of the original q, whereas t always
+receives the original p, we can deduce that:
+
+p in the final block must alias &object1
+q in the final block may alias &object1 or &object2
+r in the final block must alias &object2
+s in the final block must alias &object3
+t in the final block must alias &object1
+
+Sometimes authors differentiate between alias analysis and points-to
+analysis. Alias analysis computes a set S holding pairs of variables
+(p,q) where p and q may (or must) point to the same location. On the
+other hand, points-to analysis computes a relation points-to(p,x), where
+p may (or must) point to the location of the variable x.
+
+It is not that hard to see that accurately establishing these
+relationships is not only NP-hard, but in general, it is uncomputable
+for arbitrary programs. For formal proofs of these, see Landi et al [1].
+Practical algorithms therefore must resort to approximations, and it is
+important to mention that may-analysis is generally easier than
+must-analysis, as one should expect.
+
+Modern compilers like clang/LLVM and gcc run all sorts of fancy
+optimization and program analysis algorithms. However, for large
+codebases, not only are superpolynomial algorithms a big no-no, but even
+more expensive polynomial algorithms, say, cubic ones, are going to have
+scalability issues. That is, for compilation, more accurate alias
+analysis solutions won't be acceptable.
+
+However, when it comes to security, the trade-off is slightly different:
+spending a few minutes or even hours of compute to prevent a critical
+CVE might actually be a bloody good idea under most reasonable threat
+models and organizational economic constraints.
+
+For our model example, if we are able to establish with pointer alias
+analysis that data->ptr_inner->data aliases d2.ptr_inner->data, we can
+deduce that it aliases &taintedbuf. This enables us to raise an alert
+about an issue, given the sizes of the buffers used during strcpy.
+Cool, huh?
+
+---[ 3 - TMTDR: Too Much Theory Didn't Read
+
+Before investigating what we can come up with in terms of pointer alias
+techniques capable of discovering interesting taint-style vulnerabilities,
+let's see what compilers do when dealing with pointers. The two main
+algorithms are Andersen's and Steensgaard's, invented by fine
+Scandinavian gentlemen in the late 20th century.
+
+Andersen's algorithm is pretty much what you would come up with
+naturally after obtaining a foundational body of knowledge in program
+analysis techniques such as dataflow analysis, constraint-based analysis,
+and Abstract Interpretation.
+
+So, Andersen's algorithm kind of goes like this. Let's define set
+constraints based on program statements using the following rules.
+
+address-of)
+ [[ p = &x ]]            ->         l_x <= p
+
+copy)
+ [[ p = q ]]             ->         p => q
+
+assign)
+ [[ *p = q ]]            ->         *p => q
+
+dereference
+ [[ p = *q ]]            ->          p => *q
+
+That is, in plain English:
+
+The set of locations pointed to by p contains the label x.
+The set of locations pointed to by p must contain those pointed to by q.
+The set of locations pointed to by *p must contain those pointed to by q.
+The set of locations pointed to by p must contain those pointed to by *q.
+
+If you think of the semantics, or how to actually run this on a simple
+program, consider what happens to the labels l_x, where x is the
+object identifier. It is easy to come up with these inference rules:
+
+
+p => q    &&      l_x <= q
+-------------------------
+        l_x <= p
+
+meaning that if q is possibly pointing to some object x,
+              and now p = q is encountered,
+              then p also has the possibility to point to x.
+
+assign)
+
+*p => q   &&      l_r <= p      &&    l_x <= q
+-----------------------------------------------
+                  l_x <= r
+
+meaning that if q is possibly pointing to some object x
+            and p is possibly pointing to object r
+            and now *p = q is encountered,
+            then r has the possbility to point to x
+
+dereference)
+
+p => *q   &&      l_r <= q      &&    l_x <= r
+-----------------------------------------------
+                  l_x <= p
+
+meaning that if r is possibly pointing to object x
+             and q is possibly pointing to object r
+             and now p = *q is encountered
+             then p might point to x
+
+
+The attentive reader must have noticed that these rules have no reference
+to the order of statements whatsoever, and this is correct. The analysis
+does not consider the flow of the program, which is another way of saying
+that Andersen's algorithm is a flow-insensitive alias analysis. Let's run
+it manually for our toy example above and see whether it results in any
+inaccuracies.
+
+Collecting address-of statements:
+
+   p = &object1;
+   q = &object2;
+   s = &object3;
+
+Collecting assignments (by folding the function call into main and
+ignoring the dereferences for simplicity):
+
+     r = q;
+     q = p;
+     t = p;
+
+(The above cannot be done in general. The function func() could be
+called from different contexts, which opens up another dimension of
+analysis: context-sensitivity. Here, we use a simple example and a
+context-insensitive analysis for demonstration purposes. If you are
+Rolf Rolles, the chief scientist at Hex-Rays, this should be trivial
+and boring. If you are not him, just stay with me and it will all make
+sense.)
+
+So, first we have:
+
+p = {object1}
+q = {object2}
+r = {}
+s = {object3}
+t = {}
+
+Then, by the [copy] rule, we add a couple more labels:
+
+p = {object1}
+q = {object2, object1}
+r = {object2}
+s = {object3}
+t = {object1}
+
+Then, another run of [copy] reaches a fixpoint:
+
+p = {object1}
+q = {object2, object1}
+r = {object2, object1}
+s = {object3}
+t = {object1}
+
+The fact that you always reach a fixpoint if you define a bunch of
+inequalities, where the underlying values are discrete sets of object
+labels and where the rules (the fancy lingo is 'transfer functions')
+can only add, but never remove, 'new knowledge', should make sense
+intuitively.
+
+Generalizations of this observation have pretty important consequences
+in maths and CS, especially in game theory and logic programming. This
+generalization is celebrated as the Knaster-Tarski theorem (well, it's
+not like people throw parties dedicated to it, but you know what I mean).
+It's a mathematical guarantee that recursive definitions in logic and
+programming make sense and settle down — so we can build formal meanings
+for languages and logical systems with confidence. But anyway.
+
+Comparing our final state to the accurate solution, we see that
+Andersen's algorithm loses precision because it asserts that r may alias
+object1. This is due to flow-insensitivity: even though q can
+become an alias of p, the assignment r = q always happens before that
+statement in the actual execution flow.
+
+This may not be obvious from the example, but the lack of context-,
+field-, and flow-sensitivity means that Andersen's solution will be
+pretty inaccurate for most real-world programs. Steensgaard's is even
+worse in terms of accuracy, but at least it is roughly linear, so it
+scales well with program size (Andersen's has cubic worst-case time
+complexity).
+
+Instead of operating over the O(n^2) space of pointer pairs, Steensgaard's
+uses a constant number of abstract locations to represent objects.
+Points-to relations are therefore constrained to these abstract locations.
+In real programs, a variable can have multiple aliases; in this case,
+Steensgaard's algorithm unifies the corresponding abstract locations.
+
+And that's pretty much the algorithm. If a pointer can point to two or
+more different things, those things are merged. Then we check if that
+merged location now points to multiple things and merge those as well.
+This process repeats, eventually creating equivalence classes among the
+abstract locations.
+
+Formally, it processes the same types of statements as Andersen's:
+
+address-of)
+ [[ p = &x ]]            ->         join(*p, x)
+
+copy)
+ [[ p = q ]]             ->         join(*p, *q)
+
+assign)
+ [[ *p = q ]]            ->         join(**p, *q)
+
+dereference
+ [[ p = *q ]]            ->         join(*p, **q)
+
+But crucially, we join abstract locations (denoted by *p) like this
+(think of this as pseudocode, not Python or C, and try not to be
+bothered by its recursion):
+
+join(e1, e2):
+      if (e1 == e2)
+           return
+      e1next = *e1
+      e2next = *e2
+      unify(e1, e2)
+      join(e1next, e2next)
+
+To get an intuition for Steensgaard's, think of it this way. The
+analysis treats pointer assignments as equalities between abstract
+locations, not as subsets. Whenever two pointers are related by an
+assignment, their target locations are merged into a single equivalence
+class. This merging happens recursively via the join function, which
+ensures that not only the pointers themselves but also what they point to
+(and so on) are unified. The result is a fast, scalable analysis that
+sacrifices precision by conflating many distinct memory locations, making
+it ideal when speed matters more than exact aliasing details.
+
+So let's see a Steensgaard run for the same program as above.
+The initial state is the same.
+
+p = {object1}
+q = {object2}
+r = {}
+s = {object3}
+t = {}
+
+Then, we create the equivalence classes according to the assignments:
+
+{r} merges with {q, object2} → {r, q, object2}
+
+{q, object2, r} merges with {p, object1} → {p, q, r, object1, object2}
+
+{t} merges with {p, q, r, object1, object2} → {t, p, q, r, object1, object2}
+
+{s} remains independent, as it is not involved in any pointer assignments.
+
+After all merges, we have two final equivalence classes:
+
+{p, q, r, t, object1, object2}
+{s, object3}
+
+So, Steensgaard's algorithm manages to extract some useful information,
+but considerably less than what you'd want for security analysis. In
+exchange, each statement is processed once, and the additional operations
+are nearly constant. This results in a near-linear overall time
+complexity of O(n*alpha(n)). The alpha(n) here is the inverse Ackermann
+function, which can be treated as a constant for practical purposes.
+
+Now, although we looked at a simple example, things can get really tricky
+when you examine a few instances of this problem from the PTABEN [2]
+benchmark.
+
+Here's one checking for context-sensitivity.
+
+void bar(int**k, int**s){
+     *k = *s;
+}
+
+void foo(int**x,int**y,int**z){
+     int t;
+     *y = &t;
+     *z = *x;
+}
+
+int main(){
+     int *p1,*q1,*r1,*a1,*b1,*c1,q2,a2;
+     int **p = &p1;
+     int **q = &q1;
+    q1 = &q2;
+     int **r = &r1;
+     int **a = &a1;
+    a1 = &a2;
+     int **b = &b1;
+     int **c = &c1;
+     bar(&p,&q);
+    MUSTALIAS(p,q);
+    NOALIAS(p,&p1);
+     foo(p,q,r);
+    MUSTALIAS(q1,r1);
+     foo(a,b,c);
+    MUSTALIAS(a1,c1);
+    NOALIAS(q1,c1);
+    NOALIAS(a1,r1);
+}
+
+This looks much more like an NP-hard problem relative to program size,
+huh? Kind of like a Sudoku puzzle. Incidentally, it is possible to add
+context-sensitivity to Andersen's algorithm, but it will naturally
+increase computational complexity.
+
+The state of the art for this problem using source code (well, at least
+as of 2020) seems to be SUPA [3] improving on SFS [4], although neither
+of them targets security use cases per se. Recent research has obviously
+looked at ML-augmented tricks, but as I mentioned briefly, I'm not taking
+those things seriously for the moment.
+
+For our toy example that CodeQL failed on, field- and flow-sensitivity
+would be nice. For programs such as Emacs, whole-program analysis times
+with flow-sensitivity are still in the range of thousands of seconds,
+with superpolynomial scaling.
+
+---[ 4 - Real-world taint-style vulnerabilities
+
+In order to discover these types of vulnerabilities in real-world code, we
+need field-sensitivity and flow-sensitivity. A bit of context-sensitivity
+would also help. In addition, we might encounter indirect calls via
+function pointers (which could theoretically alias each other, becoming a
+crazy mess, but let's forget that for now).
+
+Moreover, we would love to do this using only binary code, since most
+real-life attackers won't have access to source code either, and they
+still manage to hack our applications and IoT systems. There has to be a
+way to extract 0-day semantics from the object code itself via program
+analysis, up to the limits imposed by Rice's theorem. At the end of the
+day, this is engineering. We don't care if the problem is theoretically
+impossible; we are just trying to generate actionable, high-quality
+alerts and the value that comes with them.
+
+Intuitively, many developers roll their eyes at the notion of binary
+program analysis. I think this is because they are unhappy with the false
+positives that commercial tools output, even when run on the full source
+code. This, and the fact that much information is lost during compilation,
+reinforces the wrong assumption that binary analysis means lower-quality
+findings. As we'll see, that's not the case. As far as vulnerabilities go,
+working with binaries can actually result in more accurate results.
+
+I've been in the rare and lucky position of managing to convince people to
+work with me on some crazy but serious-sounding ideas in IoT security,
+land some funding, etc., while staying out of the academic funding system.
+
+My life advice would be not to attempt repeating this. Nevertheless,
+these adventures brought me the fortune of briefly working with Balint
+Toth. He was a university student at the time who helped collect all CVEs
+for Linux-based IoT devices from 2018-2024. He downloaded the vulnerable
+firmware whenever he could, identified the vulnerable binary, and ran the
+program analysis algorithm we had at the time.
+
+Here's a snippet of the dataset:
+
+CVE-2023-38921  Netgear WG302v2 v5.2.9               /usr/sbin/configura..
+CVE-2023-3260   Dataprobe iBoot-PDU v1.43.03312023    /usr/bin/usermanag..
+CVE-2023-27988  Zyxel NAS326 v5.21(AAZF.13)C0         /usr/sbin/ntpdate_..
+CVE-2021-4045   TP-Link Tapo C200                     /usr/sbin/uhttpd
+CVE-2019-12103  TP-Link M7350 v160330                 /archive/data/QCMA..
+CVE-2021-43711  Totolink EX200 v4.0.3c.7646_B20201211 /web_cste/cgi-bin/..
+CVE-2023-34832  TP-Link AX10v1.2 v1.3.4_20230220      /usr/sbin/v6plus
+CVE-2023-29856  D-Link DIR-868L v1.12                 /htdocs/cgibin
+CVE-2019-5185   WAGO PFC200 v03.02.02(14)             /usr/bin/iocheckd
+CVE-2023-39780  Asus RT-AX55 v3.0.0.4.386.51598       /sbin/rc
+CVE-2023-38924  Netgear DGN3500 v1.1.00.37            /usr/sbin/rc
+CVE-2023-37791  D-Link DIR-619L B1 v2.04              /bin/boa
+CVE-2023-37722  Tenda F1202 v1.2.0.20(408)            /bin/httpd
+CVE-2023-34563  Netgear R6250 v1.0.4.48_10.1.30       /usr/sbin/httpd
+CVE-2023-34214  Moxa TN-5900 v3.3                     /magicP/agent/agen..
+CVE-2023-31742  Linksys WRT54GL v4.30.18_b6           /usr/sbin/httpd
+CVE-2023-31740  Linksys E2000 v1.0.06_b1              /usr/sbin/httpd
+CVE-2023-31700  TP-Link TL-WPA4530 KIT v170406        /usr/sbin/httpd
+CVE-2023-26612  D-Link DIR-823G v1.0.2B05             /bin/goahead
+CVE-2022-30114  Fastweb FASTGate v18.3.n.0482_FW_264  /bin/cmproxy
+CVE-2019-6258   D-Link DIR822B1 v202KRb06             /usr/sbin/udhcpd
+CVE-2019-20082  Asus RT-N63 v3.0.0.4.376.3754         /usr/sbin/httpd
+CVE-2019-11400  TRENDNet TEW-651BR v2.04B1            /sbin/ncc
+CVE-2018-20114  D-Link DIR-860L_REVB v2.03.B03        /htdocs/cgibin
+CVE-2023-39238  Asus RT-AX55 v3.0.0.4.386.50460       /usr/lib/libshared..
+CVE-2023-31983  Edimax N300 BR-6428NS v4_1.10         /bin/webs
+CVE-2023-33626  D-Link DIR-600 B5 v2.18               /htdocs/cgibin
+CVE-2023-34356  Peplink Surf SOHO v6.3.5              fs1/web/cgi-bin/MA..
+CVE-2023-33533  Netgear D8500 v1.0.3.60               /usr/sbin/httpd
+CVE-2023-46422  Totolink X6000R v9.4.0cu.652_B20230116 /usr/sbin/shttpd
+CVE-2023-4410   Totolink EX1200L v9.3.5u.6146_B20201023 /www/cgi-bin/cst..
+CVE-2023-34800  D-Link RT-AC750 revA v101b03          /htpdocs/cgibin
+CVE-2023-33556  Totolink A7100RU v7.4cu.2313_B20191024 /usr/lib/lighttpd..
+CVE-2023-37700  Tenda FH1203 v2.0.1.6                 /bin/httpd
+CVE-2022-38841  Linksys AX3200 v1.1.01.272918         /www/cgi-bin/porta..
+CVE-2023-38928  Netgear R7100 v1.0.0.78               /usr/sbin/httpd
+CVE-2023-31856  Totolink CP300+ v5.2cu.7594_B20200910 /web_cste/cgi-bin/..
+CVE-2023-30135  Tenda AC18 v15.03.05.19(6318_)_cn     /bin/httpd
+CVE-2023-2378   Ubiquiti EdgeRouter v2.0.9-hotfix.6   /usr/sbin/ubnt-util
+CVE-2023-29803  Totolink X18 v9.1.0cu.2024_B20220329  /web/cgi-bin/cstec..
+CVE-2023-26801  LB-Link BL-WR9000 v2.4.9              /bin/goahead
+CVE-2022-28496  Totolink CP900 v6.3c.566_B20171026    /lib/cste_modules/..
+CVE-2023-27240  Tenda AX3 v16.03.12.11                /bin/httpd
+CVE-2023-0640   TRENDnet TEW-652BRP v3.04b01          /sbin/ncc
+CVE-2023-24154  Totolink T8 v4.1.5cu                  /web/cste/cgi-bin/..
+CVE-2022-44832  D-Link DIR-3040 FW120B03              /bin/prog.cgi
+CVE-2021-3707   D-Link DSL-2750U FW1.03               /cgi-bin/webupg
+CVE-2022-31874  Asus RT-N53 v3.0.0.4.376.3754         /usr/sbin/httpd
+CVE-2022-26999  Arris TR3300 v1.0.13                  /usr/sbin/rc_app/..
+CVE-2022-24171  Tenda G1 v15.11.0.17(9502)_CN         /bin/httpd
+CVE-2021-41383  Netgear R6020 v1.0.0.48               /usr/sbin/rc_app/r..
+CVE-2020-14109  Xiaomi AX3600 v1.1.12                 /usr/sbin/meshd
+CVE-2023-45463  Netis N3 v1.0.1.751                   /bin/script/cscrip..
+CVE-2023-42320  Tenda AC10 v16.03.10.09               /bin/httpd
+CVE-2022-27646  Netgear R6700v3 v1.0.4.120            /bin/circled
+CVE-2020-19320  D-Link DIR-619L v2.0.5                /bin/boa
+CVE-2019-17621  D-Link DIR-859 v1.0.5                 /htdocs/cgibin
+CVE-2023-38922  Netgear JWNR2000v2 v1.0.0.11          /usr/sbin/uhttpd
+CVE-2023-38925  Netgear EX6200 v1.0.0.64              /usr/sbin/httpd
+CVE-2023-37758  D-Link DIR-815 v1.04                  /htdocs/cgibin
+
+Guess what? All of these are taint-style vulnerabilities hiding in the
+code of the network-facing binaries listed in the rightmost column!
+
+If only we had a pointer analysis algorithm that operated on
+multi-architecture binary code with field-, context-, and
+flow-sensitivity... Well, it turns out that a brilliant paper by
+Kai Cheng et al. attempts to solve this [5].
+
+Incidentally, I'm releasing this dataset with this article, but more on
+that later.
+
+---[ 5 - Access paths and on-demand inter-procedural analysis
+
+The authors of [5] draw their main inspiration from a much older paper
+written by Wen-Mei W. Hwu et al. [6].
+
+Let's insert a flashback here. The year is 2000. Santana's "Smooth" is
+playing on the radio, the ILOVEYOU virus is spreading through the
+Internet, people are buying their first Nokia 3310s, and yours truly is
+about to start 2nd grade at age 8. Computers are objectively pretty slow
+and crappy, even though they are routinely beating Kasparov in chess.
+IRC is huge.
+
+Most importantly for this discussion, Intel Itanium is about to become
+a thing.
+
+As some of you know, Intel Itanium was a high-performance 64-bit
+processor family with an innovative EPIC (Explicitly Parallel
+Instruction Computing) architecture. It aimed to revolutionize enterprise
+computing by delivering superior parallelism and scalability. It failed
+due to poor backward compatibility with x86 software, competition from
+x86-64 processors like AMD's Opteron, and limited adoption by software
+developers.
+
+Itanium's experimental compilers were designed to perform advanced static
+scheduling and optimization at compile time, leveraging the chip's EPIC
+architecture to extract maximum parallelism. However, these compilers
+struggled to predict runtime behavior accurately, often leading to
+suboptimal performance and failing to justify the high costs required for
+software migration. Simply put: the idea was to be clever with compilers
+and crazy with parallelization, but it just didn't work out.
+
+Still, while searching for the holy grail of Itanium compilation, the
+IMPACT Research Group at the University of Illinois, led by Wen-Mei W.
+Hwu, produced some spectacular program analysis algorithms, including
+then-state-of-the-art pointer alias analysis.
+
+Pointer analysis algorithms can be categorized based on whether they work
+with the underlying object/variable or with access paths:
+
+Object/Variable-based analysis focuses on identifying the target object
+or variable a pointer refers to, abstracting away specific access paths.
+This simplifies the analysis but may lose precision for complex memory
+structures.
+
+Access path-based analysis considers the specific paths (e.g., x->y->z)
+used to reach a memory location, enabling finer-grained insights into
+pointer targets but increasing complexity and computational cost.
+
+Access paths were used naturally in earlier algorithms, but the work in
+[6] formally defined them and explained how to do context- and
+field-sensitive interprocedural analysis more or less efficiently:
+
+Definition 2.1 (Construction of Access Paths)
+As defined by the following rules, AP denotes the function that
+recursively determines postfix access paths for C expressions that
+involve memory accesses:
+
+1.  AP(v) = v, where v is a variable.
+2.  AP(exp()) = AP(exp)n(), where exp is a call-site, either direct or
+       indirect, and n is a unique id.
+3.  AP(*exp) = AP(exp)*, if exp is not a function name.
+4.  AP(*exp) = AP(exp), if exp is a function name.
+5.  AP(exp[index]) = AP(exp), where exp is of array type and exp is not a
+       formal parameter.
+6.  AP(exp[index]) = AP(exp)*, where exp is an arbitrary pointer or a
+       formal parameter of array type.
+7.  AP(exp op exp1) = AP(exp), where op is an arbitrary binary operator
+       and exp is a pointer type variable.
+8.  AP(exp -> field) = AP(exp) * .so_so.
+9.  AP(exp.field) = AP(exp).so_so.
+10. AP(exp.field1.field2) = AP(exp).so3.so3, where
+    so3 = so1 + so2 and eo3 = eo1 + eo2.
+
+I won't go super deep into transfer functions and monotone frameworks,
+but the real meat of this paper is showing how to propagate points-to
+information across procedure calls until a fixpoint is reached. It also
+shows how access paths are crucial for analyzing complex, potentially
+recursive data structures. (I obtained the source code of the original
+IMPACT compiler in case any of you'd like to take a look.)
+
+How efficient is the resulting algorithm? Well, it's exponential in
+different parameters. Still, with a conservative k-limiting factor of 1,
+it could analyze a program as complex as gcc in 500 seconds on a
+450 MHz Pentium II, so it would be pretty damn fast and practical today.
+
+This also shows how great research in computer science eventually finds
+its application. The original objective failed, yet the same algorithm
+can be reused for security research in the 2020s! How cool is that?
+
+Still, the above algorithm operates on source code, and we need
+something better for our purposes.
+
+---[ 6 - Multi-architecture binary program analysis
+
+So, we're back to the research in [5]. Their first insight is that
+symbolic/concolic execution approaches, apart from being slow, rely
+heavily on concretization strategies. These might resolve two aliased
+symbolic addresses to different concrete addresses, preventing taint from
+propagating properly.
+
+There is also an algorithm called VSA (a form of Abstract Interpretation)
+that does fairly well on binaries for numeric and pointer analysis.
+However, like symbolic execution, it represents memory on an
+object/variable basis. For example, when a read happens, both techniques
+conservatively model the result. This could be a 'top' element in VSA's
+lattice or an unconstrained symbolic value for concolic execution. In
+either case, useful information is lost if the value is later used as an
+address.
+
+See where this is going? This is exactly the problem that access paths
+solve. Let's see how to make them work for binary code.
+
+The idea is to operate on an Intermediate Representation. Instead of the
+grammar above for AP's, we define SSEs, structured symbolic expressions
+(not to be confused with static symbolic execution) recursively like this:
+
+expr   ::= expr op_b expr | op_u expr | var
+op_b   ::= + | - | * | / | << | >> | ...
+op_u   ::= ~ | ! | ...
+var    ::= tau_reg | tau_mem | tau_val
+tau_reg ::= r_i
+tau_val ::= {Integer}
+tau_mem ::= load(expr) | store(expr)
+
+The implementation uses VEX IR, originally designed for Valgrind, then
+ported to python by the angr team, and this definition closely follows the
+main objects and operations defined there. VEX is also powerful because it
+supports lifting x86, arm, mips, riscv, mips64, arm64, ppc64 binary code
+into IR, and it is easily extensible.
+
+To motivate the analysis, I'll reproduce the example given in the paper
+with my own words. Consider the following assembly listing:
+
+LDR R1, [R3, 0x8]
+MOV R0, R1 # R1 is pointer
+STR R3, [R6, 0x4]
+
+We'd like to find all pointer aliases to R1. By looking at line 1, we see
+that it is defined there. so we add load(R3+0x8) to the aliases. Now if we
+look forward from here, we find a usage of R3, it gets stored to R6+0x4.
+Therefore, we replace R3 with store(R6+0x4), and add
+load(store(R6+0x4)+0x8) to the alias set on line 3.
+
+Similarly, for this code if we were to find the aliases of r1:
+
+mov r5, r7
+ldr r11, [r5]
+ldr r1, [r4] # r1 is a pointer
+mov r2, r1
+str r2, [r7]
+
+We would end up with these (non-trivial) expressions:
+
+* r2
+
+* load(r4)
+
+* r5
+
+* store(r7)
+
+Nice, huh? The original paper gives the following set of update rules for
+the intra-procedural analysis:
+
+SSE update with define-use chain
+(1) r_i = r_j ---replace---> expr.replace(r_i, r_j)
+(2) r_i = Binop(r_n, r_m) ---replace---> expr.replace(r_n <op> r_m, r_i)
+(3) r_i = ITE(r_j, r_n, r_m) ---replace---> expr.replace(r_n V r_m, r_i)
+(4) r_i = ITE(r_j, r_n, r_m) ---replace---> expr.replace(r_n, r_i)$
+(5) r_i = Load(r_j) ---replace---> expr.replace(load(r_j), r_i)
+(6) Store(r_i) = r_j ---replace---> expr.replace(r_j, store(r_i))
+---------------------------------------------------------------------
+SSE update following use-define chain
+(8) r_i = r_j ---replace---> expr.replace(r_i, r_j)
+(9) r_i = Binop(r_n, r_m) ---replace---> expr.replace(r_i, r_n <op> r_m)
+(10) r_i = ITE(r_j, r_n, r_m) ---replace---> expr.replace(r_i, r_n V r_m)
+(11) r_i = ITE(r_j, r_n, r_m) ---replace---> expr.replace(r_i, r_m)$
+(12) r_i = Load(r_j) ---replace---> expr.replace(r_i, load(r_j))
+(13) Store(r_i) = r_j ---replace---> expr.replace(store(r_i), r_j)
+---------------------------------------------------------------------
+SSE kills
+(14) r_i = r_j ---kill---> expr.kill()
+(15) Store(r_i) = r_j ---kill---> expr.kill()
+---------------------------------------------------------------------
+Table: Update rules for structured symbolic expressions
+
+ITE is just If-Then-Else.
+
+Believe it or not, this is still not enough to discover the
+vulnerability in the example that CodeQL also fails on due to the
+nested structures and aliasing. (Note that our problem might be slightly
+more difficult than CodeQL's, as we want to discover the bug without
+the source code, having only some binary code at our disposal.)
+
+My humble personal contribution to the set of update rules to solve this
+is the following. The analysis often encounters statements of the form
+(2), where Binop is addition:
+
+(2) r_i = Binop(r_n, r_m) ---replace---> expr.replace(r_n <op> r_m, r_i)
+
+I relax this update rule for cases when the expression is also of the
+form:
+
+
+expr <-> Add(r_n, o_2)
+
+r_i = Add(r_n, o_1) ---replace---> expr.replace(r_n + o_1, r_n + o_d)
+
+where o_d = o_1 - o_2
+
+
+This allows the replacement of expressions even if the offset does not
+completely match. Why? Structures with multiple fields can be passed on
+the stack between functions, and this transformation allows the analysis
+to recover aliasing relationships nonetheless.
+
+---[ 7 - Contributions
+
+To reiterate, the main credit goes to Kai Cheng et al. for their work.
+I had the pleasure of exchanging thoughts with Dr. Cheng and discussing
+some of the improvement ideas I had in mind regarding accuracy and their
+computational cost.
+
+The automatic discovery of IoT vulnerabilities is a field of ongoing
+research. Moreover, there are commercial tools that are not bad at all,
+some targeting scripting languages and building on solid open-source
+code-analysis tools like Joern. This list is not exhaustive, but one
+other tool is worth mentioning.
+
+MANGODFA [8], from the original angr developers at ASU and UCSB, is a
+very promising tool. Unfortunately, however, they did not evaluate
+their solution against that of [5].
+
+Reading the literature, I can confirm that while many solutions claim
+better results than [5] in some metric, its time-efficiency seems
+unbeatable. This is due to its practical time complexity and its ability
+to resolve indirect calls by applying access path algebra in a clever
+way. It can thereby address potentially vulnerable codebases that use
+large function pointer tables for dispatching, such as for URL routing
+in embedded HTTP servers.
+
+The astonishing part is that the reported timing results are single-core.
+
+The unmodified implementation on a moderately beefy workstation can scan
+an average Linux-based IoT device executable in 179 seconds and raise
+alerts with an 86% true positive rate for the taint-style vulnerabilities
+it can detect.
+
+My contributions, which I am releasing with this article, are the
+following:
+
+In collaboration with Balint Toth, I collected all the CVEs I could
+from 2018-2024 and gathered vulnerable firmware samples for them,
+identifying the vulnerable binary. [REL1]
+
+I implemented a prototype version of the algorithm for educational
+purposes. It beats CodeQL on our toy example's taint analysis problem
+by running on multi-architecture object code instead of source code.
+Furthermore, I added rules for more-accurate pointer alias analysis
+and showcased that SSE-based parallelism can be done. [REL2]
+
+I ported the original implementation of [5] from its IDA-based frontend
+to Ghidra, so the full implementation can be used as a free and
+open-source solution for security analysis. [REL3]
+
+This lends itself to a natural program toward the automation of
+low-complexity IoT vulnerability discovery.
+
+Note that if SSE-level parallelism is implemented for the full version
+of [5], an average target could be scanned in 2 to 40 seconds of
+wall-clock time, potentially scaling further with horizontal computing
+resources.
+
+Additional speedups from reimplementing the solution in native code (as
+opposed to Python) or porting it to a JIT-ed variant could bring this
+down to the few-seconds level without major algorithmic changes.
+
+Moreover, the on-demand nature of the pointer alias analysis makes the
+algorithm easily embeddable into reverse engineering and vulnerability
+research workflows, especially given these running times.
+
+
+The current implementation consults library function summaries. Other than
+that, it has no hard dependencies preventing its use on RTOS systems,
+once the necessary transfer functions for inter-procedural taint
+propagation are provided.
+
+Therefore, maintaining and improving these implementations could very well
+push low-complexity IoT vulnerability research into the "pentest era,"
+where such a tool could rediscover most past CVEs.
+
+I'm inviting the research community to:
+
+Contribute to the code artifacts released with this article.
+
+Contribute to evaluating the solution on the released real-world
+dataset, and analyze the root cause of potential false negatives
+(and, less frequently, false positives).
+
+
+---[ 8 - Prototype implementation
+
+The rest of this article will be dedicated to a very bare-bones Python
+implementation [REL2] that does just enough analysis to discover the taint
+vulnerability in binaries compiled from our example C file.
+
+It can be thought of as an appetizer for the full code in [REL3], which
+was largely developed by the original authors.
+
+I wrote most of this during two long train rides, so excuse the spaghetti
+code. Don't do this at home, kids!
+
+First, we need a way to represent SSEs. It turns out that angr has a
+module called claripy that already implements a nice AST interface for
+dealing with registers, values, and operations on them, defined in
+claripy/ast/bv.py.
+
+We just need to extend that with loads and stores to represent tau_mem
+expressions, and we are done:
+
+SSEload = operations.op('load', BV, BV,
+    calc_length=operations.basic_length_calc, bound=False)
+SSEstore = operations.op('store', BV, BV,
+    calc_length=operations.basic_length_calc, bound=False)
+That was easy.
+
+We'll also add a wrapper class around it to keep track of additional
+metadata:
+
+class SSE():
+    def __init__(self, sse, tracking, valid_notbefore,
+                 valid_notafter, parent):
+        # The actual claripy SSE symbolic bitvector
+        self.sse = sse
+        # The direction in which the SSE is valid
+        self.direction = tracking
+        # The range where the SSE variable is live
+        self.valid_notbefore = valid_notbefore
+        self.valid_notafter = valid_notafter
+        self.store_statement = None
+        self.parent = parent
+
+We already know more or less enough to implement the intraprocedural part
+of the algorithm. We'll have to fetch a block of code, select a target
+register, and scan up and down and up and down all the statements within
+that block until a fixpoint is reached, repeatedly invoking the update
+rules defined above.
+
+Let's simulate that we are doing TDD and start with this test case instead
+of high-level requirements. We know what alias expressions we should get
+for this piece of ARM assembly:
+
+AS = "arm-linux-gnueabihf-as"
+CC = "arm-linux-gnueabihf-gcc -fno-stack-protector -O0 --machine=thumb"
+
+class TestPrisCoreSSE(unittest.TestCase):
+    def test_core_simple(self):
+        code = [
+            'mov r2, r6',
+            'str r3, [r2]',
+            'ldr r1, [r3, #0x8]',
+            'ldr r0, [r6]',
+            'ldr r0, [r0, #0x8]',
+        ]
+        code_str = '\n'.join(code)
+        with open("test.s", "w") as f:
+            f.write(code_str)
+        os.system(f"{AS} test.s -o test.out")
+
+        proj = angr.Project('./test.out', auto_load_libs=False)
+        cfg = proj.analyses.CFGFast()
+        entry_node = cfg.get_any_node(proj.entry)
+        irsb = proj.factory.block(proj.entry).vex
+        res = pris_sse.traceblock(irsb, 11, "r1")[0]
+
+        expected_str = (
+            "[('r3', <BV32 load(r3 + 0x8)>), "
+            "('r2', <BV32 load(store(r2) + 0x8)>), "
+            "('r6', <BV32 load(store(r6) + 0x8)>), "
+            "('r1', <BV32 r1>), ('r0', <BV32 r0>)]"
+        )
+        self.assertEqual(str(res), expected_str)
+
+As you can see, we are taking that snippet and turn it into an ELF file
+with arm-linux-gnueabihf-as. Then, using angr.Project, the file is
+loaded into memory. We perform a quick control flow graph recovery to
+get the entry block. Then, we fetch that block, an object that is now
+a proper VEX IR SuperBlock. If you would like to familiarize yourself
+with VEX IR, the best start is probably [7].
+
+The code we have to implement, of course is the definition of traceblock()
+as used on line 23. It should take an IRSB, a statement ID corresponding
+to our entry point to the analysis, and the name of the register that
+we want to get aliases for, in this case, r1.
+
+Conceptually we are doing the following things:
+
+* Initialize an SSE for the register in the target statement.
+
+* Forward pass to propagate this SSE from the target statement to the end.
+
+* Backward pass to propagate this sse from the target statement to the
+  beginning.
+
+* Once the forward and backward passes are complete, we have a set of
+  structured symbolic expressions for all the registers.
+
+* For each register, we forward pass to propagate it to the end, and
+  backward pass to propagate it to the beginning.
+
+* If a new structured symbolic expression is found at this stage, we
+   add it to the set of structured symbolic expressions.
+
+* We repeat the above step until we have no new structured symbolic
+   expressions.
+
+* At this stage, we have the full set of structured symbolic expressions
+  for all the registers.
+
+One of my other humble additions to the original algorithm is to
+parallelize SSE transformations as much as I can (see trace_task and Pool)
+
+
+while found_new_sses:
+        # ...omitting some code...
+
+        if multithreaded:
+            # Prepare arguments for each parallel task
+            task_args = zip(
+                irsb_per_tuple,
+                global_sses_per_tuple,
+                global_sse_keys_per_tuple,
+                global_sse_map_per_tuple,
+                sse_tuples
+            )
+            with Pool(16) as p:
+                all_results = p.starmap(trace_task, task_args)
+
+        # Merge results from all parallel tasks
+        for result in all_results:
+            global_sses, global_sse_keys, global_sse_map = merge(
+                result[0], global_sses, global_sse_keys, global_sse_map)
+            global_sses, global_sse_keys, global_sse_map = merge(
+                result[1], global_sses, global_sse_keys, global_sse_map)
+
+The forward and backward passes are similar, and obviously, that's where
+the magic happens—the kind you're waiting for.
+
+The heart of the code is just going through statements and replacing SSEs
+according to their update rules:
+
+for idx, curr_stmt in enumerate(forward_statements):
+        # ...
+        if check_presence(irsb, curr_stmt, curr_var):
+            print(f"Replacing {curr_sse} at {idx}")
+            try:
+                if curr_sse in local_sse_map:
+                    print(local_sse_map[curr_sse])
+                
+                new_sse, tracking_info = do_sse_replace(
+                    curr_stmt,
+                    curr_sse,
+                    curr_var,
+                    irsb,
+                    True
+                )
+
+In more detail, this also involves tracking the direction and liveness of
+aliases (for more information on those, refer to the paper). The update
+rules themselves are implemented along the lines of this function:
+
+def do_sse_replace(stmt, sse, var, irsb, forward):
+    """
+    This function replaces a variable with a new symbolic
+    variable in the expression tree.
+
+    :param stmt:    The current instruction
+    :param sse:     The structured symbolic expression
+    :param var:     The variable to be replaced
+    :param irsb:    The VEX IRSB (block)
+    :param forward: The direction of the analysis pass
+    :return:        A new structured symbolic expression and tracking info
+    """
+
+    # ...omitting code...
+
+    if stmt.tag == "Ist_Put":
+        exprs = list(stmt.expressions)
+        print(exprs)
+        if exprs[0].tag == "Iex_RdTmp":
+            reg_started_stats(1)
+            print(" | Simple variable assignment - paper case 1")
+            print(" | ri = rj ---rj----> expr.replace(rj, ri)")
+            
+            reg_name = irsb.arch.translate_register_name(
+                stmt.offset,
+                stmt.data.result_size(irsb.tyenv) // 8
+            )
+            replacement_sse = claripy.BVS(
+                str(reg_name), 32, explicit_name=str(reg_name)
+            )
+            
+            new_sse = ast_replace(sse, replacement_sse, var)
+            tracking_info = map_rule_to_sse_direction(1, forward)
+            return (new_sse, tracking_info)
+
+    # ...and so on for other cases...
+
+This more or less completes, or at least give you an idea about the
+intraprocedural part of the algorithm. For the inter-procedural part,
+spanning multiple functions, the following has to be implemented:
+
+Algorithm 2 Intra- and inter-procedural alias analysis
+------------------------------------------------------------
+1:  procedure ANALYZEFUNCTION(CFG)
+2:     WorkList <- Postorder(CFG)
+3:     do
+4:        FINDALIAS(WorkList.reverse())    // forward
+5:        FINDALIAS(WorkList)              // backward
+6:     while new aliases can be generated
+7:        MERGE(Caller.CallSite, EntryBB.OUT_b)
+8:        MERGE(Caller.ReturnSite, ExitBB.OUT_f)
+9:
+10: procedure FINDALIAS(WorkList)
+11:    for BB in WorkList do
+12:       if BB is a callsite then
+13:          PTRs <- GETROOTPTR(PRE_f, SUC_b)
+14:          MOD, REF <- TRANSFERFUNC(PTRs, callee)
+15:          UPDATECONTEXT(PRE_f, SUC_b, MOD, REF)
+16:       else
+17:          OUT_f, OUT_b <- TRACEBLOCK(PRE_f, SUC_b)
+18:          MERGE(BB.successors, BB.OUT_f)
+19:          MERGE(BB.predecessors, BB.OUT_b)
+
+To make this barely work for our C code (or its compiled binaries), we'll
+define a minimal set of sources and sinks. We will also disregard the
+"magic" transfer function parts of the full algorithm for now.
+
+Spelled out in code:
+
+def interprocedural(proj, cfg, addr, out_sses_incoming=None):
+    main_func = cfg.kb.functions[addr]
+    print("Recursing interprocedurally")
+    print(main_func.transition_graph.nodes)
+    postorder = networkx.dfs_postorder_nodes(main_func.transition_graph)
+
+    index = 0
+    out_sses = out_sses_incoming
+    for node in postorder:
+        print(node)
+        if isinstance(node, angr.codenode.BlockNode):
+            irsb = proj.factory.block(node.addr).vex
+            irsb.pp()
+
+            # For both cases, we need to trace the block.
+            # We prepare the arguments for the traceblock call here.
+            trace_kwargs = {
+                'multithreaded': True,
+                'first': False,
+                'sse_tuples_start': out_sses[0] if out_sses else None,
+                'sse_map_start': out_sses[2] if out_sses else None
+            }
+            
+            if not out_sses and index > 0:
+                raise Exception("No outbound SSEs from previous trace")
+            
+            sse_tuples, keys, sse_map = pris_sse.traceblock(
+                irsb, None, None, **trace_kwargs
+            )
+            out_sses = rebase_sses(sse_tuples, keys, sse_map)
+
+        elif isinstance(node,
+                      angr.knowledge_plugins.functions.function.Function):
+            if node.is_plt:
+                print("Checking sinks for:")
+                print(node)
+                check_sinks(proj, node, out_sses)
+                continue
+            else:
+                interprocedural(proj, cfg, node.addr,
+                                out_sses_incoming=out_sses)
+        index += 1
+
+And finally, using our simple prototype, we are able to discover the
+issue and beat CodeQL to it!
+
+Again, it makes sense to reiterate that this solution does not require
+source code at all. Whether you compile it to x86, ARM, MIPS, or RISC-V,
+it will work just as well.
+
+Recursing interprocedurally
+[
+    <BlockNode at 0x400583 (size 26)>,
+    <Function strcpy (0x400410)>,
+    <BlockNode at 0x40059d (size 10)>
+]
+
+Function strcpy [4195344]
+  Syscall: False
+  SP difference: 0
+  Has return: False
+  Returning: True
+  Alignment: False
+  Arguments: reg: [], stack: []
+  Blocks: [0x400410]
+  Calling convention: None
+
+Checking sinks for
+Function strcpy [4195344]
+  Syscall: False
+  SP difference: 0
+  Has return: False
+  Returning: True
+  Alignment: False
+  Arguments: reg: [], stack: []
+  Blocks: [0x400410]
+  Calling convention: None
+
+False
+
+Out SSEs
+(
+    [
+        ('r3', <BV32 r3>),
+        ('r3', <BV32 store(load(r3 + 0x8) + 0x8)>),
+        ('r7', <BV32 r7 + 0x20>),
+        ('r7', <BV32 store(load(r7 + 0x10) + 0x8)>),
+        ('r7', <BV32 r7>),
+        ('r1', <BV32 r1>),
+        ('r0', <BV32 store(load(r0 + 0x8) + 0x8)>)
+    ],
+    [
+        '<BV32 r3>',
+        '<BV32 store(load(r3 + 0x8) + 0x8)>',
+        '<BV32 r7 + 0x20>',
+        '<BV32 store(load(r7 + 0x10) + 0x8)>',
+        '<BV32 r7>',
+        '<BV32 r1>',
+        '<BV32 store(load(r0 + 0x8) + 0x8)>'
+    ],
+    {
+        <BV32 r3>: <pris_sse.SSE object at 0x7a7a06212450>,
+        <BV32 store(load(r3 + 0x8) + 0x8)>: <pris_sse.SSE at 0x7a7a06211430>,
+        <BV32 r7 + 0x20>: <pris_sse.SSE object at 0x7a7a062113d0>,
+        <BV32 store(load(r7 + 0x10) + 0x8)>: <pris_sse.SSE at 0x7a7a06212390>,
+        <BV32 r7>: <pris_sse.SSE object at 0x7a7a06211c10>,
+        <BV32 r1>: <pris_sse.SSE object at 0x7a7a06211550>,
+        <BV32 store(load(r0 + 0x8) + 0x8)>: <pris_sse.SSE at 0x7a7a062109e0>
+    }
+)
+
+[ ! ] ALERT : Potential Buffer Overflow at 0x400410
+[ ! ] Tainted operand <BV32 r1> to strcpy
+[ ! ] Alias chain :
+|     SSE: <BV32 r1>
+|     parent: |     SSE: <BV32 t49>
+|     parent: |     SSE: <BV32 t42>
+|     parent: |     SSE: <BV32 t78 + 0x20>
+|     parent: |     SSE: <BV32 t70 - 0xa0 + 0x20>
+|     parent: |     SSE: <BV32 t71 - 0x8 - 0xa0 + 0x20>
+|     parent: |     SSE: <BV32 t71 - 0x8 - 0xa0 + 0x20>
+|     parent: |     SSE: <BV32 t70 - 0xa0 + 0x20>
+|     parent: |     SSE: <BV32 t78 + 0x20>
+|     parent: |     SSE: <BV32 t42>
+|     parent: <root>
+
+QED.
+
+In terms of benchmarks, the original implementation by the authors is already
+up to 200x faster than other state-of-the-art analyzers. This speedup is
+largely because earlier approaches often used angr's symbolic execution
+in an underconstrained way. That method leads to long waits for Z3
+queries to finish, state explosion, and non-trivial memory concretization
+strategies. In contrast, this solution is single-threaded, and most of
+its computation is spent on simple Python AST manipulation.
+
+This approach has proven effective for discovering real-world 0-day 
+vulnerabilities in IoT device firmware. We successfully applied it during
+our time in the research team at BugProve, a former startup focused on
+automated security analysis of embedded systems. Although the team has
+since disbanded, the methodology remains highly effective and can also be
+ used to rediscover known (N-day) vulnerabilities.
+In terms of accuracy, it outperforms VSA-based systems, achieving 90–100%
+ precision on the PTABEN basic, flow, and context pointer alias datasets.
+
+
+---[ 9 - Closing remarks
+
+This article has tried to connect the dots, showing how foundational
+research from the compiler world can be repurposed to tackle modern
+security challenges. What began as techniques to optimize code for ambitious
+hardware like Itanium has found a new, critical purpose: securing the
+vast and often opaque world of IoT devices.
+
+My central argument has been that for real-world security, especially in
+the embedded space, we must be comfortable working at the binary level.
+Source code is often a luxury we don't have, and even when we do, the
+compiled binary is the ultimate ground truth. The goal isn't to replace
+source-based tools, but to have powerful, precise analysis for the many
+situations where they fall short.
+
+The prototype I've described, built on the solid foundation of access
+paths and structured symbolic expressions, shows this is a practical
+goal. It demonstrates that even without source, we can achieve a high
+degree of precision in our analysis, outperforming other tools on
+specific, tricky problems involving pointer aliasing.
+
+This article is also an open invitation. The CVE dataset [REL1], the
+educational prototype [REL2], and the Ghidra port of the full
+implementation [REL3] are being released to provide a common ground for
+further research. There is immense potential here to improve these tools,
+find the root causes of their current limitations, and build upon them.
+
+Pushing this line of research forward could finally bring a new level of
+automation and clarity to IoT vulnerability discovery. I look forward to
+seeing what the community builds next.
+
+---[ 10 - References
+
+[1] William Landi and Barbara G. Ryder. 1991. Pointer-induced aliasing:
+a problem classification. In Proceedings of the 18th ACM
+SIGPLAN-SIGACT symposium on Principles of programming languages
+(POPL '91). Association for Computing Machinery, New York, NY, USA,
+93-103. https://doi.org/10.1145/99583.99599
+
+[2] https://github.com/SVF-tools/Test-Suite/tree/master/src
+
+[3] Y. Sui and J. Xue, "Value-Flow-Based Demand-Driven Pointer Analysis
+for C and C++," in IEEE Transactions on Software Engineering,
+vol. 46, no. 8, pp. 812-835, 1 Aug. 2020.
+doi: 10.1109/TSE.2018.2869336.
+
+[4] Ben Hardekopf and Calvin Lin. 2011. Flow-sensitive pointer analysis
+for millions of lines of code. In Proceedings of the 9th Annual
+IEEE/ACM International Symposium on Code Generation and Optimization
+(CGO '11). IEEE Computer Society, USA, 289-298.
+
+[5] Kai Cheng et al. 2023. Detecting Vulnerabilities in Linux-Based
+Embedded Firmware with SSE-Based On-Demand Alias Analysis. In
+Proceedings of the 32nd ACM SIGSOFT International Symposium on
+Software Testing and Analysis (ISSTA 2023). ACM, New York, NY,
+USA, 360-372. https://doi.org/10.1145/3597926.3598062
+
+[6] Ben-Chung Cheng and Wen-Mei W. Hwu. 2000. Modular Interprocedural
+Pointer Analysis Using Access Paths: Design, Implementation, and
+Evaluation. SIGPLAN Not. 35, 5 (May 2000), 57-69.
+https://doi.org/10.1145/358438.349311
+
+[7] https://github.com/angr/vex/blob/master/pub/libvex_ir.h#L42
+
+[8] Gibbs, Wil, et al. Operation Mango: Scalable Discovery of Taint-Style
+Vulnerabilities in Binary Firmware Services. 33rd USENIX Security
+Symposium (USENIX Security 24), USENIX Association, Aug. 2024,
+pp. 7123-7139.
+https://www.usenix.org/conference/usenixsecurity24/presentation/gibbs
+
+---[ 11 - Release artifacts
+
+[REL1] https://github.com/attilaszia/linux-iot-cves
+[REL2] https://github.com/attilaszia/pris-sse
+[REL3] https://github.com/attilaszia/emtaint-ng
+
+|=[ EOF ]=-------------------------------------------------------------=|
